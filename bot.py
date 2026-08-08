@@ -29,8 +29,10 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
     PollAnswerHandler,
     TypeHandler,
+    filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -285,6 +287,7 @@ ADMIN_HELP_KEYBOARD = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("☕ Прислать опрос сейчас", callback_data="coffee_now")],
         [InlineKeyboardButton("🎲 Разбить пары сейчас", callback_data="pairs_now")],
+        [InlineKeyboardButton("🫶🏻 Выбрать пару", callback_data="pick_prompt")],
     ]
 )
 
@@ -323,6 +326,15 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("Опрос отправлен в чат!")
     elif query.data == "pairs_now":
         await announce_pairs(context)
+    elif query.data == "pick_prompt":
+        current_poll_id = get_current_poll_id()
+        if not current_poll_id:
+            await query.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
+            return
+        context.user_data["awaiting_pick"] = True
+        await query.message.reply_text(
+            "Пришли ID участницы (например 123456789), либо перешли сюда любое её сообщение — я определю её по пересылке 🫶🏻"
+        )
 
 
 async def cmd_topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -346,6 +358,19 @@ async def cmd_coffee_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_pairs_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск распределения пар — на случай если нужно вне расписания (только для админа)."""
     await announce_pairs(context)
+
+
+async def _lookup_partner_name(bot, current_poll_id, partner_id):
+    """Ищет имя участницы по её ID — сперва среди проголосовавших, потом напрямую у Telegram."""
+    participants = get_participants(current_poll_id)
+    found = next((name for uid, name, _ in participants if uid == partner_id), None)
+    if found:
+        return found
+    try:
+        chat = await bot.get_chat(partner_id)
+        return chat.first_name or chat.username or "Без имени"
+    except Exception:
+        return None
 
 
 async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -387,27 +412,60 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ID должен быть числом. Например: /pick 123456789")
             return
 
-        # пробуем найти имя среди уже проголосовавших в этом опросе
-        participants = get_participants(current_poll_id)
-        found = next((name for uid, name, _ in participants if uid == partner_id), None)
-        if found:
-            partner_name = found
-        else:
-            # запасной вариант — спросить у Telegram напрямую
-            try:
-                chat = await context.bot.get_chat(partner_id)
-                partner_name = chat.first_name or chat.username or "Без имени"
-            except Exception:
-                await update.message.reply_text(
-                    "Не смогла найти этого человека — проверь ID, или пусть она сначала "
-                    "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
-                )
-                return
+        partner_name = await _lookup_partner_name(context.bot, current_poll_id, partner_id)
+        if not partner_name:
+            await update.message.reply_text(
+                "Не смогла найти этого человека — проверь ID, или пусть она сначала "
+                "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
+            )
+            return
     else:
         await update.message.reply_text(
             "Использование:\n"
             "— В группе, ответом на её сообщение: /pick\n"
             "— В личке с ботом: /pick 123456789 (её Telegram ID)"
+        )
+        return
+
+    set_manual_pick(current_poll_id, partner_id, partner_name)
+    await update.message.reply_text(
+        f"Готово! На этой неделе твоей парой будет {partner_name} 🫶🏻"
+    )
+
+
+async def handle_pick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ловит ответ на кнопку «Выбрать пару» — либо пересланное сообщение, либо ID текстом."""
+    if not context.user_data.get("awaiting_pick"):
+        return  # обычное сообщение в личке, не связанное с /pick — игнорируем
+
+    context.user_data["awaiting_pick"] = False
+
+    current_poll_id = get_current_poll_id()
+    if not current_poll_id:
+        await update.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
+        return
+
+    partner_id = None
+    partner_name = None
+
+    forward_user = update.message.forward_origin.sender_user if (
+        update.message.forward_origin and hasattr(update.message.forward_origin, "sender_user")
+    ) else None
+
+    if forward_user:
+        partner_id, partner_name = forward_user.id, forward_user.first_name
+    elif update.message.text and update.message.text.strip().isdigit():
+        partner_id = int(update.message.text.strip())
+        partner_name = await _lookup_partner_name(context.bot, current_poll_id, partner_id)
+        if not partner_name:
+            await update.message.reply_text(
+                "Не смогла найти этого человека — проверь ID, или пусть она сначала "
+                "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
+            )
+            return
+    else:
+        await update.message.reply_text(
+            "Не поняла — пришли ID числом (например 123456789) или перешли сюда её сообщение."
         )
         return
 
@@ -430,6 +488,7 @@ def main():
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(handle_help_buttons))
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Vilnius")
