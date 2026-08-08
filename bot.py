@@ -2,7 +2,7 @@
 Random Coffee бот для "Подруги в Вильнюсе"
 
 Логика:
-- Каждую пятницу в 12:00 бот присылает в чат опрос "Участвуешь в Random Coffee на этой неделе?"
+- Каждую субботу в 12:00 бот присылает в чат опрос "Участвуешь в Random Coffee на этой неделе?"
 - Каждый понедельник в 10:00 бот собирает всех, кто проголосовал "Да",
   случайно разбивает на пары (или тройку, если участниц нечётное число)
   и присылает результат в чат, упоминая пары по именам.
@@ -157,7 +157,7 @@ def get_manual_pick(poll_id):
 # ---------- Логика бота ----------
 
 async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
-    """Отправляется каждую пятницу."""
+    """Отправляется каждую субботу."""
     message = await context.bot.send_poll(
         chat_id=GROUP_CHAT_ID,
         question=POLL_QUESTION,
@@ -265,7 +265,7 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот Random Coffee для «Подруги в Вильнюсе». "
-        "Каждую пятницу в чате появляется опрос — проголосуй, если хочешь "
+        "Каждую субботу в чате появляется опрос — проголосуй, если хочешь "
         "случайную пару для кофе на неделе, а по понедельникам я объявлю пары ☕"
     )
 
@@ -376,7 +376,7 @@ def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Vilnius")
     scheduler.add_job(
         send_weekly_poll,
-        CronTrigger(day_of_week="fri", hour=12, minute=0),
+        CronTrigger(day_of_week="sat", hour=12, minute=0),
         kwargs={"context": application},
     )
     scheduler.add_job(
