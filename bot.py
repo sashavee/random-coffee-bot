@@ -22,9 +22,10 @@ import random
 import sqlite3
 from datetime import datetime
 
-from telegram import Update, Poll
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Poll
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     PollAnswerHandler,
@@ -270,6 +271,50 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+ADMIN_HELP_KEYBOARD = InlineKeyboardMarkup(
+    [
+        [InlineKeyboardButton("☕ Прислать опрос сейчас", callback_data="coffee_now")],
+        [InlineKeyboardButton("🎲 Разбить пары сейчас", callback_data="pairs_now")],
+    ]
+)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    is_admin = bool(ADMIN_USER_ID) and update.effective_user.id == ADMIN_USER_ID
+
+    if is_admin:
+        await update.message.reply_text(
+            "Команды администратора:\n\n"
+            "☕ /coffee_now — прислать опрос вне расписания\n"
+            "🎲 /pairs_now — разбить пары вне расписания\n"
+            "🫶🏻 /pick — заранее выбрать себе пару на неделю "
+            "(reply на сообщение в группе, или /pick 123456789 в личке)\n"
+            "🧵 /topicid — узнать ID темы группы\n\n"
+            "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
+            reply_markup=ADMIN_HELP_KEYBOARD,
+        )
+    else:
+        await update.message.reply_text(
+            "Я бот Random Coffee для «Подруги в Вильнюсе» ☕\n\n"
+            "Каждую субботу в теме появляется опрос — голосуй, если хочешь "
+            "случайную пару для встречи на неделе, а в понедельник я объявлю пары там же."
+        )
+
+
+async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+        return
+
+    await query.answer()
+    if query.data == "coffee_now":
+        await send_weekly_poll(context)
+        await query.message.reply_text("Опрос отправлен в чат!")
+    elif query.data == "pairs_now":
+        await announce_pairs(context)
+
+
 async def cmd_topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Служебная команда — напиши её в нужной теме группы, чтобы узнать её ID."""
     thread_id = update.effective_message.message_thread_id
@@ -367,10 +412,12 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("topicid", cmd_topicid))
     application.add_handler(CommandHandler("coffee_now", cmd_coffee_now))
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("pick", cmd_pick))
+    application.add_handler(CallbackQueryHandler(handle_help_buttons))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Vilnius")
