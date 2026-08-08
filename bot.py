@@ -25,10 +25,12 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Poll
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     PollAnswerHandler,
+    TypeHandler,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -263,6 +265,14 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Опубликованы пары: {len(pairs)} групп")
 
 
+async def restrict_private_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """В личке бот отвечает только администратору — остальным просто молчит."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if ADMIN_USER_ID and chat and chat.type == "private" and user and user.id != ADMIN_USER_ID:
+        raise ApplicationHandlerStop
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот Random Coffee для «Подруги в Вильнюсе». "
@@ -410,6 +420,8 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(TypeHandler(Update, restrict_private_to_admin), group=-1)
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
