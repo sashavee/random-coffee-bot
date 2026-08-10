@@ -210,11 +210,15 @@ def mention(user_id, first_name):
 
 
 async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
-    """Отправляется каждый понедельник — собирает пары и публикует результат."""
+    """Отправляется каждый понедельник — собирает пары и публикует результат.
+
+    Возвращает статус: "no_poll" (нет активного опроса), "too_few" (меньше 2 участниц)
+    или "ok" (пары успешно опубликованы) — чтобы вызывающий код мог сообщить об этом админу.
+    """
     current_poll_id = get_current_poll_id()
     if not current_poll_id:
         logger.info("Нет активного опроса — пропускаем распределение пар")
-        return
+        return "no_poll"
 
     participants = get_participants(current_poll_id)
 
@@ -237,7 +241,7 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
             text="На этой неделе набралось меньше 2 участниц для Random Coffee 😔 Попробуем на следующей!",
             message_thread_id=GROUP_TOPIC_ID,
         )
-        return
+        return "too_few"
 
     pairs = make_pairs(participants) if len(participants) >= 2 else []
     if fixed_pair:
@@ -265,6 +269,7 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=GROUP_TOPIC_ID,
     )
     logger.info(f"Опубликованы пары: {len(pairs)} групп")
+    return "ok"
 
 
 async def restrict_private_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,6 +319,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+PAIRS_STATUS_MESSAGES = {
+    "no_poll": "Сейчас нет активного опроса Random Coffee — сначала отправь /coffee_now.",
+    "too_few": "Меньше 2 участниц проголосовало — сообщение об этом уже ушло в чат.",
+    "ok": "Пары отправлены в чат! ☕",
+}
+
+
 async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
@@ -325,7 +337,8 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_weekly_poll(context)
         await query.message.reply_text("Опрос отправлен в чат!")
     elif query.data == "pairs_now":
-        await announce_pairs(context)
+        status = await announce_pairs(context)
+        await query.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
     elif query.data == "pick_prompt":
         current_poll_id = get_current_poll_id()
         if not current_poll_id:
@@ -357,7 +370,8 @@ async def cmd_coffee_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pairs_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск распределения пар — на случай если нужно вне расписания (только для админа)."""
-    await announce_pairs(context)
+    status = await announce_pairs(context)
+    await update.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
 
 
 async def _lookup_partner_name(bot, current_poll_id, partner_id):
