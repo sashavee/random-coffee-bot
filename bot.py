@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import sqlite3
 from datetime import datetime
 
@@ -305,6 +306,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Команды администратора:\n\n"
             "☕ /coffee_now — прислать опрос вне расписания\n"
             "🎲 /pairs_now — разбить пары вне расписания\n"
+            "✍️ /manual_pairs — разбить на пары участниц вручную, без привязки к опросу "
+            "(каждая с новой строки, можно с @username или ID для кликабельной ссылки)\n"
             "🫶🏻 /pick — заранее выбрать себе пару на неделю "
             "(reply на сообщение в группе, или /pick 123456789 в личке)\n"
             "🧵 /topicid — узнать ID темы группы\n\n"
@@ -372,6 +375,68 @@ async def cmd_pairs_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск распределения пар — на случай если нужно вне расписания (только для админа)."""
     status = await announce_pairs(context)
     await update.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
+
+
+def _format_manual_entry(name, ident):
+    if ident and ident.startswith("@"):
+        return f'<a href="https://t.me/{ident[1:]}">{name}</a>'
+    if ident and ident.isdigit():
+        return f'<a href="tg://user?id={ident}">{name}</a>'
+    return name
+
+
+async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Разбивает на пары участниц, присланных вручную (без привязки к опросу). Только для админа.
+
+    Использование — каждая участница с новой строки, в одном из форматов:
+        Имя               — без ссылки, просто текстом
+        Имя @username     — кликабельная ссылка на профиль
+        Имя 123456789     — кликабельная ссылка по Telegram ID
+    """
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "Пришли участниц — каждую с новой строки, в одном из форматов:\n\n"
+            "Аня — просто по имени, без ссылки\n"
+            "Маша @masha_username — кликабельная ссылка на профиль\n"
+            "Катя 123456789 — кликабельная ссылка по Telegram ID\n\n"
+            "Например:\n/manual_pairs\nАня\nМаша @masha_username\nКатя 123456789"
+        )
+        return
+
+    entries = []
+    for line in text.split("\n"):
+        line = line.strip().strip(",")
+        if not line:
+            continue
+        parts = line.rsplit(maxsplit=1)
+        if len(parts) == 2 and (parts[1].startswith("@") or parts[1].isdigit()):
+            entries.append((parts[0].strip(), parts[1]))
+        else:
+            entries.append((line, None))
+
+    if len(entries) < 2:
+        await update.message.reply_text("Нужно минимум 2 участницы (каждая с новой строки).")
+        return
+
+    pairs = make_pairs(entries)
+    lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
+    for group in pairs:
+        names = " + ".join(_format_manual_entry(name, ident) for name, ident in group)
+        lines.append(f"• {names}")
+    lines.append("\nНапишите друг другу и договоритесь о встрече на этой неделе 🫶🏻")
+
+    await context.bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text="\n".join(lines),
+        parse_mode="HTML",
+        message_thread_id=GROUP_TOPIC_ID,
+    )
+    await update.message.reply_text("Пары отправлены в чат!")
 
 
 async def _lookup_partner_name(bot, current_poll_id, partner_id):
@@ -500,6 +565,7 @@ def main():
     application.add_handler(CommandHandler("topicid", cmd_topicid))
     application.add_handler(CommandHandler("coffee_now", cmd_coffee_now))
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
+    application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(handle_help_buttons))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
