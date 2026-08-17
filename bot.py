@@ -392,6 +392,9 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Имя               — без ссылки, просто текстом
         Имя @username     — кликабельная ссылка на профиль
         Имя 123456789     — кликабельная ссылка по Telegram ID
+
+    Поставь "*" перед именем ровно у двух участниц (например, у себя и у той, кого хочешь
+    в пару), чтобы закрепить их друг за другом — остальных бот разобьёт случайно.
     """
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Эта команда доступна только администратору чата.")
@@ -403,27 +406,43 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Пришли участниц — каждую с новой строки, в одном из форматов:\n\n"
             "Аня — просто по имени, без ссылки\n"
             "Маша @masha_username — кликабельная ссылка на профиль\n"
-            "Катя 123456789 — кликабельная ссылка по Telegram ID\n\n"
-            "Например:\n/manual_pairs\nАня\nМаша @masha_username\nКатя 123456789"
+            "Катя 123456789 — кликабельная ссылка по Telegram ID\n"
+            "*Оля — звёздочка перед именем закрепляет пару (ставь ровно у двух)\n\n"
+            "Например:\n/manual_pairs\n*Аня\nМаша @masha_username\nКатя 123456789\n*Оля"
         )
         return
 
     entries = []
+    fixed_entries = []
     for line in text.split("\n"):
         line = line.strip().strip(",")
         if not line:
             continue
+        is_fixed = line.startswith("*")
+        if is_fixed:
+            line = line[1:].strip()
         parts = line.rsplit(maxsplit=1)
         if len(parts) == 2 and (parts[1].startswith("@") or parts[1].isdigit()):
-            entries.append((parts[0].strip(), parts[1]))
+            entry = (parts[0].strip(), parts[1])
         else:
-            entries.append((line, None))
+            entry = (line, None)
+        if is_fixed:
+            fixed_entries.append(entry)
+        else:
+            entries.append(entry)
 
-    if len(entries) < 2:
+    if len(fixed_entries) not in (0, 2):
+        await update.message.reply_text("Звёздочкой нужно пометить ровно двух участниц — ту пару, которую хочешь закрепить.")
+        return
+
+    if len(entries) + len(fixed_entries) < 2:
         await update.message.reply_text("Нужно минимум 2 участницы (каждая с новой строки).")
         return
 
-    pairs = make_pairs(entries)
+    pairs = make_pairs(entries) if entries else []
+    if fixed_entries:
+        pairs.insert(0, fixed_entries)
+
     lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
     for group in pairs:
         names = " + ".join(_format_manual_entry(name, ident) for name, ident in group)
