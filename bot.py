@@ -309,7 +309,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✍️ /manual_pairs — разбить на пары участниц вручную, без привязки к опросу "
             "(каждая с новой строки, можно с @username или ID для кликабельной ссылки)\n"
             "🫶🏻 /pick — заранее выбрать себе пару на неделю "
-            "(reply на сообщение в группе, или /pick 123456789 в личке)\n"
+            "(reply в группе, или в личке ID/@username/ссылка/пересланное сообщение)\n"
             "🧵 /topicid — узнать ID темы группы\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
@@ -348,9 +348,7 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
             return
         context.user_data["awaiting_pick"] = True
-        await query.message.reply_text(
-            "Пришли ID участницы (например 123456789), либо перешли сюда любое её сообщение — я определю её по пересылке 🫶🏻"
-        )
+        await query.message.reply_text(PICK_USAGE)
 
 
 async def cmd_topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -458,7 +456,10 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Пары отправлены в чат!")
 
 
-async def _lookup_partner_name(bot, current_poll_id, partner_id):
+USERNAME_RE = re.compile(r"(?:t\.me/|telegram\.me/|@)?([A-Za-z][A-Za-z0-9_]{4,31})$")
+
+
+async def _lookup_by_id(bot, current_poll_id, partner_id):
     """Ищет имя участницы по её ID — сперва среди проголосовавших, потом напрямую у Telegram."""
     participants = get_participants(current_poll_id)
     found = next((name for uid, name, _ in participants if uid == partner_id), None)
@@ -471,20 +472,64 @@ async def _lookup_partner_name(bot, current_poll_id, partner_id):
         return None
 
 
+async def _lookup_by_username(bot, username):
+    """Ищет участницу по @username или ссылке t.me/username."""
+    try:
+        chat = await bot.get_chat(f"@{username}")
+        return chat.id, chat.first_name or chat.username or username
+    except Exception:
+        return None, None
+
+
+async def _resolve_partner(bot, current_poll_id, message, text_override=None):
+    """
+    Определяет участницу из чего угодно: reply, пересланное сообщение,
+    числовой ID, @username или ссылка t.me/username.
+    Возвращает (partner_id, partner_name) или (None, None), если не вышло.
+    text_override нужен для /pick — Message от Telegram неизменяемый, поэтому текст
+    аргументов команды передаём отдельно, а не через message.text.
+    """
+    # Reply на сообщение (только в группе)
+    if message.reply_to_message:
+        partner = message.reply_to_message.from_user
+        return partner.id, partner.first_name
+
+    # Пересланное сообщение
+    forward_user = message.forward_origin.sender_user if (
+        message.forward_origin and hasattr(message.forward_origin, "sender_user")
+    ) else None
+    if forward_user:
+        return forward_user.id, forward_user.first_name
+
+    text = text_override if text_override is not None else (message.text or "").strip()
+    text = text.strip()
+    if not text:
+        return None, None
+
+    if text.isdigit():
+        partner_id = int(text)
+        name = await _lookup_by_id(bot, current_poll_id, partner_id)
+        return (partner_id, name) if name else (None, None)
+
+    match = USERNAME_RE.search(text)
+    if match:
+        return await _lookup_by_username(bot, match.group(1))
+
+    return None, None
+
+
+PICK_USAGE = (
+    "Пришли что угодно из этого:\n"
+    "— перешли сюда любое её сообщение\n"
+    "— @username или просто username\n"
+    "— ссылку на профиль (t.me/username)\n"
+    "— её Telegram ID числом\n"
+    "— или (в группе) ответь на её сообщение командой /pick"
+)
+
+
 async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Только для администратора. Два способа использования:
-
-    1) В группе, ответом (reply) на сообщение нужной участницы:
-       /pick
-
-    2) В личке с ботом, указав её Telegram user_id:
-       /pick 123456789
-
-    Тогда при распределении пар она автоматически станет твоей парой,
-    а остальные будут разбиты случайно между собой. Выбор через личку
-    никак не виден в общем чате.
-    """
+    """Только для администратора — заранее закрепить себе пару на неделю. См. PICK_USAGE."""
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Эта команда доступна только администратору чата.")
         return
@@ -494,34 +539,17 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
         return
 
-    partner_id = None
-    partner_name = None
+    if not update.message.reply_to_message and not context.args:
+        await update.message.reply_text(PICK_USAGE)
+        return
 
-    # Способ 1 — reply на сообщение в группе
-    if update.message.reply_to_message:
-        partner = update.message.reply_to_message.from_user
-        partner_id, partner_name = partner.id, partner.first_name
-
-    # Способ 2 — id передан текстом (можно в личке, чтобы никто не видел)
-    elif context.args:
-        try:
-            partner_id = int(context.args[0])
-        except ValueError:
-            await update.message.reply_text("ID должен быть числом. Например: /pick 123456789")
-            return
-
-        partner_name = await _lookup_partner_name(context.bot, current_poll_id, partner_id)
-        if not partner_name:
-            await update.message.reply_text(
-                "Не смогла найти этого человека — проверь ID, или пусть она сначала "
-                "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
-            )
-            return
-    else:
+    # /pick <что угодно> — соберём аргумент(ы) обратно в текст для единого разбора
+    text_arg = " ".join(context.args) if context.args else None
+    partner_id, partner_name = await _resolve_partner(context.bot, current_poll_id, update.message, text_override=text_arg)
+    if not partner_name:
         await update.message.reply_text(
-            "Использование:\n"
-            "— В группе, ответом на её сообщение: /pick\n"
-            "— В личке с ботом: /pick 123456789 (её Telegram ID)"
+            "Не смогла найти этого человека — проверь юзернейм/ID/ссылку, или пусть она сначала "
+            "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
         )
         return
 
@@ -532,7 +560,7 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_pick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ловит ответ на кнопку «Выбрать пару» — либо пересланное сообщение, либо ID текстом."""
+    """Ловит ответ на кнопку «Выбрать пару» — что угодно из PICK_USAGE."""
     if not context.user_data.get("awaiting_pick"):
         return  # обычное сообщение в личке, не связанное с /pick — игнорируем
 
@@ -543,27 +571,10 @@ async def handle_pick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
         return
 
-    partner_id = None
-    partner_name = None
-
-    forward_user = update.message.forward_origin.sender_user if (
-        update.message.forward_origin and hasattr(update.message.forward_origin, "sender_user")
-    ) else None
-
-    if forward_user:
-        partner_id, partner_name = forward_user.id, forward_user.first_name
-    elif update.message.text and update.message.text.strip().isdigit():
-        partner_id = int(update.message.text.strip())
-        partner_name = await _lookup_partner_name(context.bot, current_poll_id, partner_id)
-        if not partner_name:
-            await update.message.reply_text(
-                "Не смогла найти этого человека — проверь ID, или пусть она сначала "
-                "хоть раз напишет что-нибудь в общем чате, тогда бот её узнает."
-            )
-            return
-    else:
+    partner_id, partner_name = await _resolve_partner(context.bot, current_poll_id, update.message)
+    if not partner_name:
         await update.message.reply_text(
-            "Не поняла — пришли ID числом (например 123456789) или перешли сюда её сообщение."
+            "Не смогла найти этого человека — проверь юзернейм/ID/ссылку, или перешли её сообщение целиком."
         )
         return
 
