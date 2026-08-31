@@ -89,6 +89,14 @@ def init_db():
             pairs_json TEXT
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pairs_draft (
+            poll_id TEXT PRIMARY KEY,
+            pairs_json TEXT,
+            pool_json TEXT,
+            updated_at TEXT
+        )"""
+    )
     conn.commit()
     conn.close()
 
@@ -124,6 +132,33 @@ def get_saved_pairs(poll_id):
 def clear_pairs_published(poll_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM pairs_published WHERE poll_id = ?", (poll_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_draft(poll_id, pairs, pool):
+    """Сохраняет незавершённый выбор пар (кнопочный сборщик) — переживает перезапуск бота."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO pairs_draft (poll_id, pairs_json, pool_json, updated_at) VALUES (?, ?, ?, ?)",
+        (poll_id, json.dumps(pairs, ensure_ascii=False), json.dumps(pool, ensure_ascii=False), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_draft(poll_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT pairs_json, pool_json FROM pairs_draft WHERE poll_id = ?", (poll_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return json.loads(row[0]), json.loads(row[1])
+
+
+def clear_draft(poll_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM pairs_draft WHERE poll_id = ?", (poll_id,))
     conn.commit()
     conn.close()
 
@@ -290,6 +325,18 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Пары для этого опроса уже опубликованы — пропускаем повтор")
         return "already_published"
 
+    # --- Незавершённый ручной выбор через кнопочный сборщик — используем его как есть,
+    # а всех, кого админ не успела разобрать, добираем случайно.
+    draft = get_draft(current_poll_id)
+    if draft:
+        draft_pairs, draft_pool = draft
+        published = await _publish_pairs_message(context, current_poll_id, draft_pairs, draft_pool)
+        clear_draft(current_poll_id)
+        if published:
+            logger.info("Опубликован черновик пар из кнопочного сборщика")
+            return "ok"
+        # черновик оказался пустым — просто продолжаем обычной логикой ниже
+
     participants = get_participants(current_poll_id)
 
     # --- Ручной выбор администратора (если сделан командой /pick) ---
@@ -440,6 +487,17 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         if is_pairs_published(current_poll_id):
             await query.message.reply_text(PAIRS_STATUS_MESSAGES["already_published"])
             return
+
+        draft = get_draft(current_poll_id)
+        if draft:
+            draft_pairs, draft_pool = draft
+            context.user_data["manual_pairs"] = draft_pairs
+            context.user_data["manual_pool"] = draft_pool
+            context.user_data["manual_selected"] = None
+            text, markup = render_manual_state(context)
+            await query.message.reply_text("Продолжаем с того места, где остановились 🙂\n\n" + text, reply_markup=markup)
+            return
+
         people = [(uid, name) for uid, name, _ in get_participants(current_poll_id)]
         if len(people) < 2:
             await query.message.reply_text("В текущем опросе меньше 2 проголосовавших — собирать пока не из кого.")
@@ -498,6 +556,35 @@ def _clear_manual_state(context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("manual_selected", None)
 
 
+async def _publish_pairs_message(context: ContextTypes.DEFAULT_TYPE, poll_id, pairs, pool=None):
+    """Публикует уже собранные пары ([uid, name] группы) и доразбивает остаток pool случайно."""
+    final_pairs = [list(group) for group in pairs]
+    if pool:
+        final_pairs.extend(make_pairs([tuple(p) for p in pool]))
+    if not final_pairs:
+        return False
+
+    random.shuffle(final_pairs)
+    for group in final_pairs:
+        random.shuffle(group)
+
+    lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
+    for group in final_pairs:
+        names = " + ".join(mention(uid, name) for uid, name in group)
+        lines.append(f"• {names}")
+    lines.append("\nНапишите друг другу и договоритесь о встрече на этой неделе 🫶🏻")
+
+    await context.bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text="\n".join(lines),
+        parse_mode="HTML",
+        message_thread_id=GROUP_TOPIC_ID,
+    )
+    saved = [[{"uid": uid, "name": name, "ident": None} for uid, name in group] for group in final_pairs]
+    mark_pairs_published(poll_id, saved)
+    return True
+
+
 async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
@@ -510,8 +597,12 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Сессия сборки пар устарела — начни заново через /help.")
         return
 
+    current_poll_id = get_current_poll_id()
+
     if query.data == "mcancel":
         _clear_manual_state(context)
+        if current_poll_id:
+            clear_draft(current_poll_id)
         await query.edit_message_text("Отменено.")
         return
 
@@ -520,6 +611,8 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["manual_pairs"].extend([list(group) for group in new_pairs])
         context.user_data["manual_pool"] = []
         context.user_data["manual_selected"] = None
+        if current_poll_id:
+            save_draft(current_poll_id, context.user_data["manual_pairs"], context.user_data["manual_pool"])
         text, markup = render_manual_state(context)
         await query.edit_message_text(text, reply_markup=markup)
         return
@@ -529,35 +622,16 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
         if not pairs:
             await query.answer("Пока нет ни одной пары.", show_alert=True)
             return
-        current_poll_id = get_current_poll_id()
         if current_poll_id and is_pairs_published(current_poll_id):
             _clear_manual_state(context)
+            clear_draft(current_poll_id)
             await query.edit_message_text(PAIRS_STATUS_MESSAGES["already_published"])
             return
-        random.shuffle(pairs)
-        for group in pairs:
-            random.shuffle(group)
 
-        lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
-        for group in pairs:
-            names = " + ".join(mention(uid, name) for uid, name in group)
-            lines.append(f"• {names}")
-        lines.append("\nНапишите друг другу и договоритесь о встрече на этой неделе 🫶🏻")
-
-        leftover = context.user_data.get("manual_pool", [])
-        if leftover:
-            leftover_uid, leftover_name = leftover[0]
-            lines.append(f"\n\n{mention(leftover_uid, leftover_name)} — на этой неделе пары не хватило, но обязательно в следующий раз! 🫶🏻")
-
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text="\n".join(lines),
-            parse_mode="HTML",
-            message_thread_id=GROUP_TOPIC_ID,
-        )
+        pool_remaining = context.user_data.get("manual_pool", [])
+        await _publish_pairs_message(context, current_poll_id, pairs, pool_remaining)
         if current_poll_id:
-            saved = [[{"uid": uid, "name": name, "ident": None} for uid, name in group] for group in pairs]
-            mark_pairs_published(current_poll_id, saved)
+            clear_draft(current_poll_id)
         _clear_manual_state(context)
         await query.edit_message_text("Пары отправлены в чат! ☕")
         return
@@ -575,6 +649,8 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data["manual_pairs"].append([[selected, name_a], [uid, name_b]])
             context.user_data["manual_pool"] = [p for p in pool if p[0] not in (selected, uid)]
             context.user_data["manual_selected"] = None
+            if current_poll_id:
+                save_draft(current_poll_id, context.user_data["manual_pairs"], context.user_data["manual_pool"])
         text, markup = render_manual_state(context)
         await query.edit_message_text(text, reply_markup=markup)
 
