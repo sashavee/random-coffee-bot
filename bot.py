@@ -246,7 +246,9 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
 
     pairs = make_pairs(participants) if len(participants) >= 2 else []
     if fixed_pair:
-        pairs.insert(0, fixed_pair)  # пара админа — первая в списке
+        random.shuffle(fixed_pair)  # чтобы админ не оказывался всегда первой в паре
+        pairs.append(fixed_pair)
+    random.shuffle(pairs)  # чтобы пара админа не оказывалась всегда первой в списке
 
     if participants and len(participants) == 1:
         # осталась одна лишняя участница без пары (из-за того что админ забрал себе партнёршу)
@@ -307,7 +309,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "☕ /coffee_now — прислать опрос вне расписания\n"
             "🎲 /pairs_now — разбить пары вне расписания\n"
             "✍️ /manual_pairs — разбить на пары участниц вручную, без привязки к опросу "
-            "(каждая с новой строки, можно с @username или ID для кликабельной ссылки)\n"
+            "(каждая с новой строки; одинаковый номер перед именами — закрепляет пару)\n"
             "🫶🏻 /pick — заранее выбрать себе пару на неделю "
             "(reply в группе, или в личке ID/@username/ссылка/пересланное сообщение)\n"
             "🧵 /topicid — узнать ID темы группы\n\n"
@@ -383,6 +385,9 @@ def _format_manual_entry(name, ident):
     return name
 
 
+MANUAL_GROUP_RE = re.compile(r"^(\d+)\s+(.+)$")
+
+
 async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Разбивает на пары участниц, присланных вручную (без привязки к опросу). Только для админа.
 
@@ -391,8 +396,9 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Имя @username     — кликабельная ссылка на профиль
         Имя 123456789     — кликабельная ссылка по Telegram ID
 
-    Поставь "*" перед именем ровно у двух участниц (например, у себя и у той, кого хочешь
-    в пару), чтобы закрепить их друг за другом — остальных бот разобьёт случайно.
+    Чтобы задать саму пару вручную (не полагаясь на рандом), поставь перед именами
+    одинаковый номер — все с одним номером станут одной группой/парой. Участницы без
+    номера будут случайно разбиты между собой.
     """
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Эта команда доступна только администратору чата.")
@@ -405,41 +411,40 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Аня — просто по имени, без ссылки\n"
             "Маша @masha_username — кликабельная ссылка на профиль\n"
             "Катя 123456789 — кликабельная ссылка по Telegram ID\n"
-            "*Оля — звёздочка перед именем закрепляет пару (ставь ровно у двух)\n\n"
-            "Например:\n/manual_pairs\n*Аня\nМаша @masha_username\nКатя 123456789\n*Оля"
+            "1 Оля — номер перед именем закрепляет пару/группу (у всех с одним номером)\n\n"
+            "Например (Аня+Маша и Катя+Оля — сама выбрала, Вера — в случайную пару с кем-то ещё):\n"
+            "/manual_pairs\n1 Аня\n1 Маша @masha_username\n2 Катя 123456789\n2 Оля\nВера"
         )
         return
 
-    entries = []
-    fixed_entries = []
+    groups = {}
+    free_entries = []
     for line in text.split("\n"):
         line = line.strip().strip(",")
         if not line:
             continue
-        is_fixed = line.startswith("*")
-        if is_fixed:
-            line = line[1:].strip()
-        parts = line.rsplit(maxsplit=1)
+        group_match = MANUAL_GROUP_RE.match(line)
+        group_num, rest = (group_match.group(1), group_match.group(2)) if group_match else (None, line)
+        parts = rest.rsplit(maxsplit=1)
         if len(parts) == 2 and (parts[1].startswith("@") or parts[1].isdigit()):
             entry = (parts[0].strip(), parts[1])
         else:
-            entry = (line, None)
-        if is_fixed:
-            fixed_entries.append(entry)
+            entry = (rest, None)
+        if group_num:
+            groups.setdefault(group_num, []).append(entry)
         else:
-            entries.append(entry)
+            free_entries.append(entry)
 
-    if len(fixed_entries) not in (0, 2):
-        await update.message.reply_text("Звёздочкой нужно пометить ровно двух участниц — ту пару, которую хочешь закрепить.")
-        return
-
-    if len(entries) + len(fixed_entries) < 2:
+    total = len(free_entries) + sum(len(g) for g in groups.values())
+    if total < 2:
         await update.message.reply_text("Нужно минимум 2 участницы (каждая с новой строки).")
         return
 
-    pairs = make_pairs(entries) if entries else []
-    if fixed_entries:
-        pairs.insert(0, fixed_entries)
+    pairs = make_pairs(free_entries) if free_entries else []
+    for group in groups.values():
+        random.shuffle(group)  # чтобы внутри закреплённой пары порядок тоже не был предсказуемым
+        pairs.append(group)
+    random.shuffle(pairs)  # чтобы закреплённые пары не были всегда первыми в списке
 
     lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
     for group in pairs:
