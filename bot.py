@@ -648,7 +648,10 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
     for group in pairs:
-        names = " + ".join(_format_manual_entry(name, ident) for name, ident in group)
+        if len(group) == 1:
+            names = f"{_format_manual_entry(*group[0])} +"
+        else:
+            names = " + ".join(_format_manual_entry(name, ident) for name, ident in group)
         lines.append(f"• {names}")
     lines.append("\nНапишите друг другу и договоритесь о встрече на этой неделе 🫶🏻")
 
