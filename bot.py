@@ -16,6 +16,7 @@ Random Coffee бот для "Подруги в Вильнюсе"
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -84,7 +85,8 @@ def init_db():
     conn.execute(
         """CREATE TABLE IF NOT EXISTS pairs_published (
             poll_id TEXT PRIMARY KEY,
-            published_at TEXT
+            published_at TEXT,
+            pairs_json TEXT
         )"""
     )
     conn.commit()
@@ -98,14 +100,25 @@ def is_pairs_published(poll_id):
     return row is not None
 
 
-def mark_pairs_published(poll_id):
+def mark_pairs_published(poll_id, pairs):
+    """Сохраняет и сам факт публикации, и реальное содержимое пар (переживает передеплои)."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "INSERT OR REPLACE INTO pairs_published (poll_id, published_at) VALUES (?, ?)",
-        (poll_id, datetime.utcnow().isoformat()),
+        "INSERT OR REPLACE INTO pairs_published (poll_id, published_at, pairs_json) VALUES (?, ?, ?)",
+        (poll_id, datetime.utcnow().isoformat(), json.dumps(pairs, ensure_ascii=False)),
     )
     conn.commit()
     conn.close()
+
+
+def get_saved_pairs(poll_id):
+    """Возвращает сохранённые пары для опроса — список групп, каждая группа список entry-dict'ов."""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT pairs_json FROM pairs_published WHERE poll_id = ?", (poll_id,)).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    return json.loads(row[0])
 
 
 def clear_pairs_published(poll_id):
@@ -327,7 +340,8 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         message_thread_id=GROUP_TOPIC_ID,
     )
-    mark_pairs_published(current_poll_id)
+    saved = [[{"uid": uid, "name": name, "ident": None} for uid, name, _ in group] for group in pairs]
+    mark_pairs_published(current_poll_id, saved)
     logger.info(f"Опубликованы пары: {len(pairs)} групп")
     return "ok"
 
@@ -377,6 +391,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "(reply в группе, или в личке ID/@username/ссылка/пересланное сообщение)\n"
             "🧵 /topicid — узнать ID темы группы\n"
             "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n"
+            "📋 /current_pairs — посмотреть, какие пары реально опубликованы для текущего опроса\n"
             "🙈 /glitch — отправить случайное «сломанное» сообщение (прикрыть удалённый пост)\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
@@ -541,7 +556,8 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
             message_thread_id=GROUP_TOPIC_ID,
         )
         if current_poll_id:
-            mark_pairs_published(current_poll_id)
+            saved = [[{"uid": uid, "name": name, "ident": None} for uid, name in group] for group in pairs]
+            mark_pairs_published(current_poll_id, saved)
         _clear_manual_state(context)
         await query.edit_message_text("Пары отправлены в чат! ☕")
         return
@@ -593,6 +609,16 @@ def _format_manual_entry(name, ident):
     if ident and ident.isdigit():
         return f'<a href="tg://user?id={ident}">{name}</a>'
     return name
+
+
+def _format_saved_entry(entry):
+    """Отображает entry-dict из сохранённых пар (uid — реальный Telegram ID, ident — @username/ID из ручного ввода)."""
+    uid = entry.get("uid")
+    name = entry.get("name")
+    ident = entry.get("ident")
+    if uid:
+        return mention(uid, name)
+    return _format_manual_entry(name, ident)
 
 
 MANUAL_GROUP_RE = re.compile(r"^(\d+)\s+(.+)$")
@@ -677,7 +703,8 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=GROUP_TOPIC_ID,
     )
     if current_poll_id:
-        mark_pairs_published(current_poll_id)
+        saved = [[{"uid": None, "name": name, "ident": ident} for name, ident in group] for group in pairs]
+        mark_pairs_published(current_poll_id, saved)
     await update.message.reply_text("Пары отправлены в чат!")
 
 
@@ -692,6 +719,26 @@ async def cmd_unlock_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_pairs_published(current_poll_id)
     await update.message.reply_text("Готово, можно отправлять пары для этого опроса заново.")
+
+
+async def cmd_current_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает, какие пары реально были опубликованы для текущего опроса (только для админа)."""
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+    current_poll_id = get_current_poll_id()
+    if not current_poll_id:
+        await update.message.reply_text("Сейчас нет активного опроса Random Coffee.")
+        return
+    saved = get_saved_pairs(current_poll_id)
+    if not saved:
+        await update.message.reply_text("Для этого опроса пары ещё не публиковались.")
+        return
+    lines = ["☕ Опубликованные пары для этой недели:\n"]
+    for group in saved:
+        names = " + ".join(_format_saved_entry(entry) for entry in group)
+        lines.append(f"• {names}")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 def _fake_id():
@@ -909,6 +956,7 @@ def main():
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
     application.add_handler(CommandHandler("unlock_pairs", cmd_unlock_pairs))
+    application.add_handler(CommandHandler("current_pairs", cmd_current_pairs))
     application.add_handler(CommandHandler("glitch", cmd_glitch))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
@@ -955,6 +1003,7 @@ def main():
                         BotCommand("manual_pairs", "Разбить пары вручную текстом"),
                         BotCommand("pick", "Заранее выбрать себе пару"),
                         BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
+                        BotCommand("current_pairs", "Показать опубликованные пары"),
                         BotCommand("glitch", "Отправить «сломанное» сообщение"),
                         BotCommand("topicid", "Узнать ID темы группы"),
                     ],
