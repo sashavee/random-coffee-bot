@@ -72,6 +72,36 @@ def init_db():
             PRIMARY KEY (poll_id, user_id)
         )"""
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS pairs_published (
+            poll_id TEXT PRIMARY KEY,
+            published_at TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_pairs_published(poll_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT 1 FROM pairs_published WHERE poll_id = ?", (poll_id,)).fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_pairs_published(poll_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO pairs_published (poll_id, published_at) VALUES (?, ?)",
+        (poll_id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_pairs_published(poll_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM pairs_published WHERE poll_id = ?", (poll_id,))
     conn.commit()
     conn.close()
 
@@ -186,8 +216,8 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     user = answer.user
     if 0 in answer.option_ids:  # индекс 0 = "Да, давайте!"
-        add_participant(current_poll_id, user.id, user.first_name, user.username)
-        logger.info(f"{user.first_name} присоединилась к Random Coffee")
+        add_participant(current_poll_id, user.id, full_name(user), user.username)
+        logger.info(f"{full_name(user)} присоединилась к Random Coffee")
     else:
         remove_participant(current_poll_id, user.id)
 
@@ -212,16 +242,31 @@ def mention(user_id, first_name):
     return f'<a href="tg://user?id={user_id}">{first_name}</a>'
 
 
+def full_name(entity):
+    """Полное имя (Имя + Фамилия) из объекта User/Chat, чтобы участниц не путать по одному имени."""
+    if not entity:
+        return None
+    name = entity.first_name or ""
+    if getattr(entity, "last_name", None):
+        name = f"{name} {entity.last_name}".strip()
+    return name or (getattr(entity, "username", None) or "Без имени")
+
+
 async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
     """Отправляется каждый понедельник — собирает пары и публикует результат.
 
-    Возвращает статус: "no_poll" (нет активного опроса), "too_few" (меньше 2 участниц)
-    или "ok" (пары успешно опубликованы) — чтобы вызывающий код мог сообщить об этом админу.
+    Возвращает статус: "no_poll" (нет активного опроса), "already_published" (пары для
+    этого опроса уже отправлялись), "too_few" (меньше 2 участниц) или "ok" (опубликовано) —
+    чтобы вызывающий код мог сообщить об этом админу.
     """
     current_poll_id = get_current_poll_id()
     if not current_poll_id:
         logger.info("Нет активного опроса — пропускаем распределение пар")
         return "no_poll"
+
+    if is_pairs_published(current_poll_id):
+        logger.info("Пары для этого опроса уже опубликованы — пропускаем повтор")
+        return "already_published"
 
     participants = get_participants(current_poll_id)
 
@@ -273,6 +318,7 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         message_thread_id=GROUP_TOPIC_ID,
     )
+    mark_pairs_published(current_poll_id)
     logger.info(f"Опубликованы пары: {len(pairs)} групп")
     return "ok"
 
@@ -315,7 +361,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "(каждая с новой строки; одинаковый номер перед именами — закрепляет пару)\n"
             "🫶🏻 /pick — заранее выбрать себе пару на неделю "
             "(reply в группе, или в личке ID/@username/ссылка/пересланное сообщение)\n"
-            "🧵 /topicid — узнать ID темы группы\n\n"
+            "🧵 /topicid — узнать ID темы группы\n"
+            "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
         )
@@ -329,6 +376,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 PAIRS_STATUS_MESSAGES = {
     "no_poll": "Сейчас нет активного опроса Random Coffee — сначала отправь /coffee_now.",
+    "already_published": "Пары для этого опроса уже отправлялись — повторно не шлю. Если правда нужно переотправить — сначала /unlock_pairs.",
     "too_few": "Меньше 2 участниц проголосовало — сообщение об этом уже ушло в чат.",
     "ok": "Пары отправлены в чат! ☕",
 }
@@ -358,6 +406,9 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         current_poll_id = get_current_poll_id()
         if not current_poll_id:
             await query.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
+            return
+        if is_pairs_published(current_poll_id):
+            await query.message.reply_text(PAIRS_STATUS_MESSAGES["already_published"])
             return
         people = [(uid, name) for uid, name, _ in get_participants(current_poll_id)]
         if len(people) < 2:
@@ -448,6 +499,11 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
         if not pairs:
             await query.answer("Пока нет ни одной пары.", show_alert=True)
             return
+        current_poll_id = get_current_poll_id()
+        if current_poll_id and is_pairs_published(current_poll_id):
+            _clear_manual_state(context)
+            await query.edit_message_text(PAIRS_STATUS_MESSAGES["already_published"])
+            return
         random.shuffle(pairs)
         for group in pairs:
             random.shuffle(group)
@@ -469,6 +525,8 @@ async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="HTML",
             message_thread_id=GROUP_TOPIC_ID,
         )
+        if current_poll_id:
+            mark_pairs_published(current_poll_id)
         _clear_manual_state(context)
         await query.edit_message_text("Пары отправлены в чат! ☕")
         return
@@ -541,6 +599,11 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Эта команда доступна только администратору чата.")
         return
 
+    current_poll_id = get_current_poll_id()
+    if current_poll_id and is_pairs_published(current_poll_id):
+        await update.message.reply_text(PAIRS_STATUS_MESSAGES["already_published"])
+        return
+
     text = update.message.text.partition(" ")[2].strip()
     if not text:
         await update.message.reply_text(
@@ -595,7 +658,22 @@ async def cmd_manual_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
         message_thread_id=GROUP_TOPIC_ID,
     )
+    if current_poll_id:
+        mark_pairs_published(current_poll_id)
     await update.message.reply_text("Пары отправлены в чат!")
+
+
+async def cmd_unlock_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Снимает блокировку повторной отправки пар для текущего опроса (только для админа)."""
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+    current_poll_id = get_current_poll_id()
+    if not current_poll_id:
+        await update.message.reply_text("Сейчас нет активного опроса Random Coffee.")
+        return
+    clear_pairs_published(current_poll_id)
+    await update.message.reply_text("Готово, можно отправлять пары для этого опроса заново.")
 
 
 USERNAME_RE = re.compile(r"(?:t\.me/|telegram\.me/|@)?([A-Za-z][A-Za-z0-9_]{4,31})$")
@@ -609,7 +687,7 @@ async def _lookup_by_id(bot, current_poll_id, partner_id):
         return found
     try:
         chat = await bot.get_chat(partner_id)
-        return chat.first_name or chat.username or "Без имени"
+        return full_name(chat)
     except Exception:
         return None
 
@@ -618,7 +696,7 @@ async def _lookup_by_username(bot, username):
     """Ищет участницу по @username или ссылке t.me/username."""
     try:
         chat = await bot.get_chat(f"@{username}")
-        return chat.id, chat.first_name or chat.username or username
+        return chat.id, full_name(chat) or username
     except Exception:
         return None, None
 
@@ -634,14 +712,14 @@ async def _resolve_partner(bot, current_poll_id, message, text_override=None):
     # Reply на сообщение (только в группе)
     if message.reply_to_message:
         partner = message.reply_to_message.from_user
-        return partner.id, partner.first_name
+        return partner.id, full_name(partner)
 
     # Пересланное сообщение
     forward_user = message.forward_origin.sender_user if (
         message.forward_origin and hasattr(message.forward_origin, "sender_user")
     ) else None
     if forward_user:
-        return forward_user.id, forward_user.first_name
+        return forward_user.id, full_name(forward_user)
 
     text = text_override if text_override is not None else (message.text or "").strip()
     text = text.strip()
@@ -738,6 +816,7 @@ def main():
     application.add_handler(CommandHandler("coffee_now", cmd_coffee_now))
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
+    application.add_handler(CommandHandler("unlock_pairs", cmd_unlock_pairs))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
         handle_help_buttons, pattern="^(coffee_now|pairs_now|pick_prompt|manual_start)$"
