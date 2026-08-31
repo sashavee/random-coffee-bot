@@ -24,7 +24,7 @@ import secrets
 import sqlite3
 from datetime import datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Poll
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, Poll
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -923,6 +923,20 @@ def main():
         # активный event loop (на новых версиях Python scheduler.start() до
         # этого момента падает с RuntimeError: no current event loop).
         scheduler.start()
+
+        # Чтобы команды подсвечивались в меню Telegram при наборе "/" — иначе
+        # они всё равно работают, если напечатать вручную, но их не видно в подсказках.
+        await app.bot.set_my_commands([
+            BotCommand("start", "Что я умею"),
+            BotCommand("help", "Список команд администратора"),
+            BotCommand("coffee_now", "Прислать опрос сейчас"),
+            BotCommand("pairs_now", "Разбить пары сейчас"),
+            BotCommand("manual_pairs", "Разбить пары вручную текстом"),
+            BotCommand("pick", "Заранее выбрать себе пару"),
+            BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
+            BotCommand("glitch", "Отправить «сломанное» сообщение"),
+            BotCommand("topicid", "Узнать ID темы группы"),
+        ])
 
     application.post_init = start_scheduler
 
