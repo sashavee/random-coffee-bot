@@ -124,6 +124,8 @@ def get_participants(poll_id):
     return rows
 
 
+
+
 def set_manual_pick(poll_id, partner_id, partner_name):
     """Сохраняет заранее выбранную админом пару на текущую неделю."""
     conn = sqlite3.connect(DB_PATH)
@@ -296,6 +298,7 @@ ADMIN_HELP_KEYBOARD = InlineKeyboardMarkup(
         [InlineKeyboardButton("☕ Прислать опрос сейчас", callback_data="coffee_now")],
         [InlineKeyboardButton("🎲 Разбить пары сейчас", callback_data="pairs_now")],
         [InlineKeyboardButton("🫶🏻 Выбрать пару", callback_data="pick_prompt")],
+        [InlineKeyboardButton("✍️ Собрать пары вручную", callback_data="manual_start")],
     ]
 )
 
@@ -351,6 +354,140 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         context.user_data["awaiting_pick"] = True
         await query.message.reply_text(PICK_USAGE)
+    elif query.data == "manual_start":
+        current_poll_id = get_current_poll_id()
+        if not current_poll_id:
+            await query.message.reply_text("Сейчас нет активного опроса Random Coffee — сначала должен появиться новый.")
+            return
+        people = [(uid, name) for uid, name, _ in get_participants(current_poll_id)]
+        if len(people) < 2:
+            await query.message.reply_text("В текущем опросе меньше 2 проголосовавших — собирать пока не из кого.")
+            return
+        context.user_data["manual_pool"] = [[uid, name] for uid, name in people]
+        context.user_data["manual_pairs"] = []
+        context.user_data["manual_selected"] = None
+        text, markup = render_manual_state(context)
+        await query.message.reply_text(text, reply_markup=markup)
+
+
+def render_manual_state(context: ContextTypes.DEFAULT_TYPE):
+    pool = context.user_data.get("manual_pool", [])
+    pairs = context.user_data.get("manual_pairs", [])
+    selected = context.user_data.get("manual_selected")
+
+    lines = ["✍️ Собираем пары из последнего опроса — тапай по именам (сначала одну, потом вторую):\n"]
+    if pairs:
+        lines.append("Уже готово:")
+        for group in pairs:
+            lines.append("• " + " + ".join(name for _, name in group))
+        lines.append("")
+    if selected is not None:
+        sel_name = next((name for uid, name in pool if uid == selected), "")
+        lines.append(f"Выбрано: {sel_name} — теперь тапни вторую участницу")
+    elif pool:
+        lines.append("Осталось разобрать:")
+    else:
+        lines.append("Все разобраны!")
+
+    buttons = []
+    row = []
+    for uid, name in pool:
+        label = f"✅ {name}" if uid == selected else name
+        row.append(InlineKeyboardButton(label, callback_data=f"mtoggle:{uid}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    controls = []
+    if len(pool) >= 2:
+        controls.append(InlineKeyboardButton("🎲 Остальных случайно", callback_data="mrandom"))
+    if pairs:
+        controls.append(InlineKeyboardButton("✅ Опубликовать", callback_data="mdone"))
+    controls.append(InlineKeyboardButton("❌ Отмена", callback_data="mcancel"))
+    buttons.append(controls)
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _clear_manual_state(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("manual_pool", None)
+    context.user_data.pop("manual_pairs", None)
+    context.user_data.pop("manual_selected", None)
+
+
+async def handle_manual_picker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+        return
+    await query.answer()
+
+    pool = context.user_data.get("manual_pool")
+    if pool is None:
+        await query.edit_message_text("Сессия сборки пар устарела — начни заново через /help.")
+        return
+
+    if query.data == "mcancel":
+        _clear_manual_state(context)
+        await query.edit_message_text("Отменено.")
+        return
+
+    if query.data == "mrandom":
+        new_pairs = make_pairs([tuple(p) for p in pool])
+        context.user_data["manual_pairs"].extend([list(group) for group in new_pairs])
+        context.user_data["manual_pool"] = []
+        context.user_data["manual_selected"] = None
+        text, markup = render_manual_state(context)
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    if query.data == "mdone":
+        pairs = context.user_data.get("manual_pairs", [])
+        if not pairs:
+            await query.answer("Пока нет ни одной пары.", show_alert=True)
+            return
+        random.shuffle(pairs)
+        for group in pairs:
+            random.shuffle(group)
+
+        lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
+        for group in pairs:
+            names = " + ".join(mention(uid, name) for uid, name in group)
+            lines.append(f"• {names}")
+        lines.append("\nНапишите друг другу и договоритесь о встрече на этой неделе 🫶🏻")
+
+        leftover = context.user_data.get("manual_pool", [])
+        if leftover:
+            leftover_uid, leftover_name = leftover[0]
+            lines.append(f"\n\n{mention(leftover_uid, leftover_name)} — на этой неделе пары не хватило, но обязательно в следующий раз! 🫶🏻")
+
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text="\n".join(lines),
+            parse_mode="HTML",
+            message_thread_id=GROUP_TOPIC_ID,
+        )
+        _clear_manual_state(context)
+        await query.edit_message_text("Пары отправлены в чат! ☕")
+        return
+
+    if query.data.startswith("mtoggle:"):
+        uid = int(query.data.split(":", 1)[1])
+        selected = context.user_data.get("manual_selected")
+        if selected is None:
+            context.user_data["manual_selected"] = uid
+        elif selected == uid:
+            context.user_data["manual_selected"] = None
+        else:
+            name_a = next((name for i, name in pool if i == selected), None)
+            name_b = next((name for i, name in pool if i == uid), None)
+            context.user_data["manual_pairs"].append([[selected, name_a], [uid, name_b]])
+            context.user_data["manual_pool"] = [p for p in pool if p[0] not in (selected, uid)]
+            context.user_data["manual_selected"] = None
+        text, markup = render_manual_state(context)
+        await query.edit_message_text(text, reply_markup=markup)
 
 
 async def cmd_topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -602,7 +739,10 @@ def main():
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
     application.add_handler(CommandHandler("pick", cmd_pick))
-    application.add_handler(CallbackQueryHandler(handle_help_buttons))
+    application.add_handler(CallbackQueryHandler(
+        handle_help_buttons, pattern="^(coffee_now|pairs_now|pick_prompt|manual_start)$"
+    ))
+    application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
