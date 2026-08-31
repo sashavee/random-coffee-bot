@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import sqlite3
 from datetime import datetime
 
@@ -362,7 +363,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🫶🏻 /pick — заранее выбрать себе пару на неделю "
             "(reply в группе, или в личке ID/@username/ссылка/пересланное сообщение)\n"
             "🧵 /topicid — узнать ID темы группы\n"
-            "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n\n"
+            "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n"
+            "🙈 /glitch — отправить случайное «сломанное» сообщение (прикрыть удалённый пост)\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
         )
@@ -679,6 +681,54 @@ async def cmd_unlock_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Готово, можно отправлять пары для этого опроса заново.")
 
 
+def _fake_id():
+    return secrets.token_hex(3)
+
+
+GLITCH_STATIC_MESSAGES = [
+    lambda: f"⚠️ error: pairs_id mismatch (poll_{_fake_id()}) — повторная генерация...",
+    lambda: f"⚠️ database timeout while fetching pairs (poll_{_fake_id()}) — retry in progress...",
+    lambda: "🔧 упс, распределение не сохранилось корректно — пересобираю пары, минутку",
+    lambda: f"⚠️ KeyError: 'partner_id' in pairing.py, line {random.randint(80, 240)} — падаю, поднимаю заново",
+    lambda: "⚠️ не смогла прочитать голоса из опроса — данные повреждены, жду следующего запуска",
+]
+
+
+async def _glitch_solo_list():
+    """Список участниц последнего опроса, каждая как «пара сама с собой» — визуально как баг."""
+    current_poll_id = get_current_poll_id()
+    if not current_poll_id:
+        return None
+    participants = get_participants(current_poll_id)
+    if not participants:
+        return None
+    lines = ["☕ Пары для Random Coffee на этой неделе:\n"]
+    for uid, name, _ in participants:
+        lines.append(f"• {mention(uid, name)} +")
+    return "\n".join(lines)
+
+
+async def cmd_glitch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет в чат один случайный "сломанный" вид сообщения (только для админа)."""
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+
+    candidates = [(msg_fn(), None) for msg_fn in GLITCH_STATIC_MESSAGES]
+    solo_text = await _glitch_solo_list()
+    if solo_text:
+        candidates.append((solo_text, "HTML"))
+
+    text, parse_mode = random.choice(candidates)
+    await context.bot.send_message(
+        chat_id=GROUP_CHAT_ID,
+        text=text,
+        parse_mode=parse_mode,
+        message_thread_id=GROUP_TOPIC_ID,
+    )
+    await update.message.reply_text("Отправлено 🙈")
+
+
 USERNAME_RE = re.compile(r"(?:t\.me/|telegram\.me/|@)?([A-Za-z][A-Za-z0-9_]{4,31})$")
 
 
@@ -820,6 +870,7 @@ def main():
     application.add_handler(CommandHandler("pairs_now", cmd_pairs_now))
     application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
     application.add_handler(CommandHandler("unlock_pairs", cmd_unlock_pairs))
+    application.add_handler(CommandHandler("glitch", cmd_glitch))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
         handle_help_buttons, pattern="^(coffee_now|pairs_now|pick_prompt|manual_start)$"
