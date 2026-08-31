@@ -24,7 +24,15 @@ import secrets
 import sqlite3
 from datetime import datetime
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update, Poll
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    Poll,
+)
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -325,10 +333,15 @@ async def announce_pairs(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def restrict_private_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """В личке бот отвечает только администратору — остальным просто молчит."""
+    """В личке бот отвечает только администратору — остальным присылает редирект в чат."""
     chat = update.effective_chat
     user = update.effective_user
     if ADMIN_USER_ID and chat and chat.type == "private" and user and user.id != ADMIN_USER_ID:
+        if update.message:
+            await update.message.reply_text(
+                "Всё про Random Coffee происходит в общем чате ☕ Проголосуй в опросе там — "
+                "и пары я тоже пришлю туда 🫶🏻"
+            )
         raise ApplicationHandlerStop
 
 
@@ -926,17 +939,32 @@ def main():
 
         # Чтобы команды подсвечивались в меню Telegram при наборе "/" — иначе
         # они всё равно работают, если напечатать вручную, но их не видно в подсказках.
-        await app.bot.set_my_commands([
-            BotCommand("start", "Что я умею"),
-            BotCommand("help", "Список команд администратора"),
-            BotCommand("coffee_now", "Прислать опрос сейчас"),
-            BotCommand("pairs_now", "Разбить пары сейчас"),
-            BotCommand("manual_pairs", "Разбить пары вручную текстом"),
-            BotCommand("pick", "Заранее выбрать себе пару"),
-            BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
-            BotCommand("glitch", "Отправить «сломанное» сообщение"),
-            BotCommand("topicid", "Узнать ID темы группы"),
-        ])
+        # Админ-команды регистрируем ТОЛЬКО в scope личного чата с админом, чтобы
+        # остальные участницы их вообще не видели в подсказках (это не разрешения,
+        # это просто видимость — но /glitch и /pick незачем светить всем).
+        await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
+
+        if ADMIN_USER_ID:
+            try:
+                await app.bot.set_my_commands(
+                    [
+                        BotCommand("start", "Что я умею"),
+                        BotCommand("help", "Список команд администратора"),
+                        BotCommand("coffee_now", "Прислать опрос сейчас"),
+                        BotCommand("pairs_now", "Разбить пары сейчас"),
+                        BotCommand("manual_pairs", "Разбить пары вручную текстом"),
+                        BotCommand("pick", "Заранее выбрать себе пару"),
+                        BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
+                        BotCommand("glitch", "Отправить «сломанное» сообщение"),
+                        BotCommand("topicid", "Узнать ID темы группы"),
+                    ],
+                    scope=BotCommandScopeChat(chat_id=ADMIN_USER_ID),
+                )
+            except Exception:
+                # Например, если админ ещё ни разу не писал боту в личку — Telegram
+                # пока не даёт задать команды для этого чата. Не критично, попробуем
+                # снова при следующем запуске.
+                logger.warning("Не удалось задать команды для личного чата с админом", exc_info=True)
 
     application.post_init = start_scheduler
 
