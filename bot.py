@@ -685,12 +685,12 @@ def _fake_id():
     return secrets.token_hex(3)
 
 
-GLITCH_STATIC_MESSAGES = [
-    lambda: f"⚠️ error: pairs_id mismatch (poll_{_fake_id()}) — повторная генерация...",
-    lambda: f"⚠️ database timeout while fetching pairs (poll_{_fake_id()}) — retry in progress...",
-    lambda: "🔧 упс, распределение не сохранилось корректно — пересобираю пары, минутку",
-    lambda: f"⚠️ KeyError: 'partner_id' in pairing.py, line {random.randint(80, 240)} — падаю, поднимаю заново",
-    lambda: "⚠️ не смогла прочитать голоса из опроса — данные повреждены, жду следующего запуска",
+GLITCH_OPTIONS = [
+    ("⚠️ pairs_id mismatch", lambda: f"⚠️ error: pairs_id mismatch (poll_{_fake_id()}) — повторная генерация..."),
+    ("⚠️ database timeout", lambda: f"⚠️ database timeout while fetching pairs (poll_{_fake_id()}) — retry in progress..."),
+    ("🔧 распределение не сохранилось", lambda: "🔧 упс, распределение не сохранилось корректно — пересобираю пары, минутку"),
+    ("⚠️ KeyError partner_id", lambda: f"⚠️ KeyError: 'partner_id' in pairing.py, line {random.randint(80, 240)} — падаю, поднимаю заново"),
+    ("⚠️ голоса повреждены", lambda: "⚠️ не смогла прочитать голоса из опроса — данные повреждены, жду следующего запуска"),
 ]
 
 
@@ -709,24 +709,50 @@ async def _glitch_solo_list():
 
 
 async def cmd_glitch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет в чат один случайный "сломанный" вид сообщения (только для админа)."""
+    """Показывает кнопки — какое "сломанное" сообщение отправить в чат (только для админа)."""
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("Эта команда доступна только администратору чата.")
         return
 
-    candidates = [(msg_fn(), None) for msg_fn in GLITCH_STATIC_MESSAGES]
-    solo_text = await _glitch_solo_list()
-    if solo_text:
-        candidates.append((solo_text, "HTML"))
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"glitch:{i}")]
+        for i, (label, _) in enumerate(GLITCH_OPTIONS)
+    ]
+    if await _glitch_solo_list():
+        buttons.append([InlineKeyboardButton("📋 список без пар", callback_data="glitch:solo")])
 
-    text, parse_mode = random.choice(candidates)
+    await update.message.reply_text(
+        "Какое сообщение отправить в чат?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def handle_glitch_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+        return
+    await query.answer()
+
+    choice = query.data.split(":", 1)[1]
+    if choice == "solo":
+        text = await _glitch_solo_list()
+        parse_mode = "HTML"
+    else:
+        text = GLITCH_OPTIONS[int(choice)][1]()
+        parse_mode = None
+
+    if not text:
+        await query.edit_message_text("Не вышло — нет данных для этого варианта.")
+        return
+
     await context.bot.send_message(
         chat_id=GROUP_CHAT_ID,
         text=text,
         parse_mode=parse_mode,
         message_thread_id=GROUP_TOPIC_ID,
     )
-    await update.message.reply_text("Отправлено 🙈")
+    await query.edit_message_text("Отправлено 🙈")
 
 
 USERNAME_RE = re.compile(r"(?:t\.me/|telegram\.me/|@)?([A-Za-z][A-Za-z0-9_]{4,31})$")
@@ -876,6 +902,7 @@ def main():
         handle_help_buttons, pattern="^(coffee_now|pairs_now|pick_prompt|manual_start)$"
     ))
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
+    application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
