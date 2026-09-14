@@ -503,8 +503,21 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif query.data == "coffee_now_cancel":
         await query.edit_message_text("Отменено, ничего не отправлено.")
     elif query.data == "pairs_now":
+        confirm_keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Да, отправить в чат", callback_data="pairs_now_confirm"),
+                InlineKeyboardButton("❌ Отмена", callback_data="pairs_now_cancel"),
+            ]]
+        )
+        await query.message.reply_text(
+            "Это разобьёт всех проголосовавших на пары и отправит в чат прямо сейчас. Точно?",
+            reply_markup=confirm_keyboard,
+        )
+    elif query.data == "pairs_now_confirm":
         status = await announce_pairs(context)
-        await query.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
+        await query.edit_message_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
+    elif query.data == "pairs_now_cancel":
+        await query.edit_message_text("Отменено, ничего не отправлено.")
     elif query.data == "pick_prompt":
         current_poll_id = get_current_poll_id()
         if not current_poll_id:
@@ -702,14 +715,36 @@ async def cmd_topicid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_coffee_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск опроса — на случай если нужно вне расписания (только для админа)."""
-    await send_weekly_poll(context)
-    await update.message.reply_text("Опрос отправлен в чат!")
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+    confirm_keyboard = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("✅ Да, отправить в чат", callback_data="coffee_now_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="coffee_now_cancel"),
+        ]]
+    )
+    await update.message.reply_text(
+        "Это отправит опрос в тему прямо сейчас, увидят все в чате. Точно?",
+        reply_markup=confirm_keyboard,
+    )
 
 
 async def cmd_pairs_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск распределения пар — на случай если нужно вне расписания (только для админа)."""
-    status = await announce_pairs(context)
-    await update.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+    confirm_keyboard = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("✅ Да, отправить в чат", callback_data="pairs_now_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="pairs_now_cancel"),
+        ]]
+    )
+    await update.message.reply_text(
+        "Это разобьёт всех проголосовавших на пары и отправит в чат прямо сейчас. Точно?",
+        reply_markup=confirm_keyboard,
+    )
 
 
 def _format_manual_entry(name, ident):
@@ -1113,7 +1148,8 @@ def main():
     application.add_handler(CommandHandler("glitch", cmd_glitch))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
-        handle_help_buttons, pattern="^(coffee_now|coffee_now_confirm|coffee_now_cancel|pairs_now|pick_prompt|manual_start)$"
+        handle_help_buttons,
+        pattern="^(coffee_now|coffee_now_confirm|coffee_now_cancel|pairs_now|pairs_now_confirm|pairs_now_cancel|pick_prompt|manual_start)$",
     ))
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
