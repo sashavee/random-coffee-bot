@@ -889,8 +889,16 @@ async def cmd_polls(update: Update, context: ContextTypes.DEFAULT_TYPE):
         published = " ✅ пары отправлены" if is_pairs_published(poll_id) else ""
         lines.append(f"— {votes} голосов{mark}{published}")
         if poll_id != current_poll_id:
-            label = f"↩️ Сделать активным ({votes} голосов)"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"setpoll:{poll_id}")])
+            buttons.append([
+                InlineKeyboardButton(f"↩️ Сделать активным ({votes})", callback_data=f"setpoll:{poll_id}"),
+                InlineKeyboardButton("🔗 Объединить с активным", callback_data=f"mergepoll:{poll_id}"),
+            ])
+
+    lines.append(
+        "\n«Объединить с активным» — если голоса разъехались по разным опросам "
+        "(например, случайно отправили новый поверх старого) — добавляет всех "
+        "проголосовавших «Да» из этого опроса к текущему активному, никого не теряя."
+    )
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -909,6 +917,37 @@ async def handle_setpoll_button(update: Update, context: ContextTypes.DEFAULT_TY
     save_poll_id(poll_id)
     await query.edit_message_text(
         "Готово — теперь этот опрос активный. Можно собирать пары через /help или /pairs_now."
+    )
+
+
+async def handle_mergepoll_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переносит всех проголосовавших "Да" из другого опроса в текущий активный —
+    чинит ситуацию, когда голоса из-за бага/переключений разъехались по разным опросам."""
+    query = update.callback_query
+    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+        return
+    await query.answer()
+
+    current_poll_id = get_current_poll_id()
+    if not current_poll_id:
+        await query.edit_message_text("Сейчас нет активного опроса — сначала выбери его через /polls.")
+        return
+
+    source_poll_id = query.data.split(":", 1)[1]
+    existing_ids = {uid for uid, _, _ in get_participants(current_poll_id)}
+    source_participants = get_participants(source_poll_id)
+
+    added = 0
+    for uid, name, username in source_participants:
+        if uid not in existing_ids:
+            add_participant(current_poll_id, uid, name, username)
+            added += 1
+
+    total = len(get_participants(current_poll_id))
+    await query.edit_message_text(
+        f"Готово — добавлено {added} новых участниц из того опроса. "
+        f"Теперь в текущем активном опросе {total} голосов «Да»."
     )
 
 
@@ -1158,6 +1197,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
     application.add_handler(CallbackQueryHandler(handle_setpoll_button, pattern=r"^setpoll:"))
+    application.add_handler(CallbackQueryHandler(handle_mergepoll_button, pattern=r"^mergepoll:"))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
