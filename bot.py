@@ -164,6 +164,8 @@ def clear_draft(poll_id):
 
 
 def save_poll_id(poll_id: str):
+    """Делает poll_id "текущим" — не создаёт новый опрос, просто переставляет указатель
+    (используется и при создании нового опроса, и при возврате к старому через /polls)."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM current_poll")  # храним только последний активный опрос
     conn.execute(
@@ -172,6 +174,23 @@ def save_poll_id(poll_id: str):
     )
     conn.commit()
     conn.close()
+
+
+def get_recent_polls(limit=8):
+    """Последние опросы, по которым есть хоть один голос "да" — новые сначала.
+    Определяется по participants (а не по отдельному логу), поэтому находит даже
+    опросы, отправленные до этого обновления бота."""
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        """SELECT poll_id, COUNT(user_id) AS votes, MAX(rowid) AS latest
+           FROM participants
+           GROUP BY poll_id
+           ORDER BY latest DESC
+           LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [(poll_id, votes) for poll_id, votes, _ in rows]
 
 
 def get_current_poll_id():
@@ -439,6 +458,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧵 /topicid — узнать ID темы группы\n"
             "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n"
             "📋 /current_pairs — посмотреть, какие пары реально опубликованы для текущего опроса\n"
+            "🗳 /polls — список последних опросов, можно вернуть активным любой из них (если случайно отправили новый поверх)\n"
             "🙈 /glitch — отправить случайное «сломанное» сообщение (прикрыть удалённый пост)\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
@@ -467,8 +487,21 @@ async def handle_help_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.answer()
     if query.data == "coffee_now":
+        confirm_keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("✅ Да, отправить в чат", callback_data="coffee_now_confirm"),
+                InlineKeyboardButton("❌ Отмена", callback_data="coffee_now_cancel"),
+            ]]
+        )
+        await query.message.reply_text(
+            "Это отправит опрос в тему прямо сейчас, увидят все в чате. Точно?",
+            reply_markup=confirm_keyboard,
+        )
+    elif query.data == "coffee_now_confirm":
         await send_weekly_poll(context)
-        await query.message.reply_text("Опрос отправлен в чат!")
+        await query.edit_message_text("Опрос отправлен в чат!")
+    elif query.data == "coffee_now_cancel":
+        await query.edit_message_text("Отменено, ничего не отправлено.")
     elif query.data == "pairs_now":
         status = await announce_pairs(context)
         await query.message.reply_text(PAIRS_STATUS_MESSAGES.get(status, "Готово."))
@@ -797,6 +830,49 @@ async def cmd_unlock_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Готово, можно отправлять пары для этого опроса заново.")
 
 
+async def cmd_polls(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список последних опросов с числом голосов — можно вернуться к любому из них
+    (например, если случайно отправили новый опрос поверх старого). Только для админа."""
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
+        return
+
+    polls = get_recent_polls()
+    if not polls:
+        await update.message.reply_text("Пока нет ни одного опроса с голосами.")
+        return
+
+    current_poll_id = get_current_poll_id()
+    buttons = []
+    lines = ["🗳 Последние опросы:\n"]
+    for poll_id, votes in polls:
+        mark = " (сейчас активный)" if poll_id == current_poll_id else ""
+        published = " ✅ пары отправлены" if is_pairs_published(poll_id) else ""
+        lines.append(f"— {votes} голосов{mark}{published}")
+        if poll_id != current_poll_id:
+            label = f"↩️ Сделать активным ({votes} голосов)"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"setpoll:{poll_id}")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
+
+
+async def handle_setpoll_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+        return
+    await query.answer()
+
+    poll_id = query.data.split(":", 1)[1]
+    save_poll_id(poll_id)
+    await query.edit_message_text(
+        "Готово — теперь этот опрос активный. Можно собирать пары через /help или /pairs_now."
+    )
+
+
 async def cmd_current_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает, какие пары реально были опубликованы для текущего опроса (только для админа)."""
     if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
@@ -1033,13 +1109,15 @@ def main():
     application.add_handler(CommandHandler("manual_pairs", cmd_manual_pairs))
     application.add_handler(CommandHandler("unlock_pairs", cmd_unlock_pairs))
     application.add_handler(CommandHandler("current_pairs", cmd_current_pairs))
+    application.add_handler(CommandHandler("polls", cmd_polls))
     application.add_handler(CommandHandler("glitch", cmd_glitch))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
-        handle_help_buttons, pattern="^(coffee_now|pairs_now|pick_prompt|manual_start)$"
+        handle_help_buttons, pattern="^(coffee_now|coffee_now_confirm|coffee_now_cancel|pairs_now|pick_prompt|manual_start)$"
     ))
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
+    application.add_handler(CallbackQueryHandler(handle_setpoll_button, pattern=r"^setpoll:"))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
@@ -1080,6 +1158,7 @@ def main():
                         BotCommand("pick", "Заранее выбрать себе пару"),
                         BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
                         BotCommand("current_pairs", "Показать опубликованные пары"),
+                        BotCommand("polls", "Список опросов, вернуть активным нужный"),
                         BotCommand("glitch", "Отправить «сломанное» сообщение"),
                         BotCommand("topicid", "Узнать ID темы группы"),
                     ],
