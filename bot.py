@@ -797,13 +797,13 @@ async def cmd_polls(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     current_poll_id = get_current_poll_id()
     buttons = []
-    lines = ["🗳 Последние опросы:\n"]
-    for poll_id, votes in polls:
-        mark = " (сейчас активный)" if poll_id == current_poll_id else ""
+    lines = ["🗳 Последние опросы (от новых к старым):\n"]
+    for i, (poll_id, votes) in enumerate(polls, start=1):
+        mark = " — сейчас активный" if poll_id == current_poll_id else ""
         published = " ✅ пары отправлены" if is_pairs_published(poll_id) else ""
-        lines.append(f"— {votes} голосов{mark}{published}")
+        lines.append(f"{i}. {votes} голосов{mark}{published}")
         if poll_id != current_poll_id:
-            buttons.append([InlineKeyboardButton(f"↩️ Сделать активным ({votes})", callback_data=f"setpoll:{poll_id}")])
+            buttons.append([InlineKeyboardButton(f"↩️ Сделать активным — №{i} ({votes} голосов)", callback_data=f"setpoll:{poll_id}")])
 
     await update.message.reply_text(
         "\n".join(lines),
