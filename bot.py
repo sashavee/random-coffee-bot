@@ -47,6 +47,9 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+import pytz
+
+VILNIUS_TZ = pytz.timezone("Europe/Vilnius")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -95,6 +98,12 @@ def init_db():
             pairs_json TEXT,
             pool_json TEXT,
             updated_at TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS poll_created (
+            poll_id TEXT PRIMARY KEY,
+            created_at TEXT
         )"""
     )
     conn.commit()
@@ -176,21 +185,34 @@ def save_poll_id(poll_id: str):
     conn.close()
 
 
+def log_poll_created(poll_id: str):
+    """Запоминает момент создания опроса — только для отображения даты в /polls."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR IGNORE INTO poll_created (poll_id, created_at) VALUES (?, ?)",
+        (poll_id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_recent_polls(limit=8):
-    """Последние опросы, по которым есть хоть один голос "да" — новые сначала.
-    Определяется по participants (а не по отдельному логу), поэтому находит даже
-    опросы, отправленные до этого обновления бота."""
+    """Последние опросы, по которым есть хоть один голос "да" — новые сначала, с датой
+    создания (если известна — для опросов, отправленных до этого обновления, будет None).
+    Список участников определяется по participants, а не по poll_created, поэтому находит
+    даже опросы, отправленные до появления этой таблицы."""
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        """SELECT poll_id, COUNT(user_id) AS votes, MAX(rowid) AS latest
-           FROM participants
-           GROUP BY poll_id
+        """SELECT p.poll_id, COUNT(p.user_id) AS votes, MAX(p.rowid) AS latest, pc.created_at
+           FROM participants p
+           LEFT JOIN poll_created pc ON pc.poll_id = p.poll_id
+           GROUP BY p.poll_id
            ORDER BY latest DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
     conn.close()
-    return [(poll_id, votes) for poll_id, votes, _ in rows]
+    return [(poll_id, votes, created_at) for poll_id, votes, _, created_at in rows]
 
 
 def get_current_poll_id():
@@ -280,6 +302,7 @@ async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
         message_thread_id=GROUP_TOPIC_ID,
     )
     save_poll_id(message.poll.id)
+    log_poll_created(message.poll.id)
     logger.info(f"Отправлен новый опрос Random Coffee: {message.poll.id}")
 
 
@@ -798,12 +821,17 @@ async def cmd_polls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_poll_id = get_current_poll_id()
     buttons = []
     lines = ["🗳 Последние опросы (от новых к старым):\n"]
-    for i, (poll_id, votes) in enumerate(polls, start=1):
+    for i, (poll_id, votes, created_at) in enumerate(polls, start=1):
+        if created_at:
+            dt = pytz.utc.localize(datetime.fromisoformat(created_at)).astimezone(VILNIUS_TZ)
+            date_str = dt.strftime("%d.%m %H:%M")
+        else:
+            date_str = "дата неизвестна"
         mark = " — сейчас активный" if poll_id == current_poll_id else ""
         published = " ✅ пары отправлены" if is_pairs_published(poll_id) else ""
-        lines.append(f"{i}. {votes} голосов{mark}{published}")
+        lines.append(f"{i}. {date_str} — {votes} голосов{mark}{published}")
         if poll_id != current_poll_id:
-            buttons.append([InlineKeyboardButton(f"↩️ Сделать активным — №{i} ({votes} голосов)", callback_data=f"setpoll:{poll_id}")])
+            buttons.append([InlineKeyboardButton(f"↩️ Сделать активным — №{i} ({date_str})", callback_data=f"setpoll:{poll_id}")])
 
     await update.message.reply_text(
         "\n".join(lines),
