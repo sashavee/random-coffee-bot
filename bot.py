@@ -870,6 +870,7 @@ async def cmd_add_voter(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not update.message.reply_to_message and not context.args:
+        context.user_data["awaiting_add_voter"] = True
         await update.message.reply_text(PICK_USAGE)
         return
 
@@ -1084,11 +1085,14 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_pick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ловит ответ на кнопку «Выбрать пару» — что угодно из PICK_USAGE."""
-    if not context.user_data.get("awaiting_pick"):
-        return  # обычное сообщение в личке, не связанное с /pick — игнорируем
+    """Ловит ответ на кнопку «Выбрать пару» или на голый /add_voter — что угодно из PICK_USAGE."""
+    awaiting_pick = context.user_data.get("awaiting_pick")
+    awaiting_add_voter = context.user_data.get("awaiting_add_voter")
+    if not awaiting_pick and not awaiting_add_voter:
+        return  # обычное сообщение в личке, ни с чем не связанное — игнорируем
 
     context.user_data["awaiting_pick"] = False
+    context.user_data["awaiting_add_voter"] = False
 
     current_poll_id = get_current_poll_id()
     if not current_poll_id:
@@ -1102,10 +1106,15 @@ async def handle_pick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    set_manual_pick(current_poll_id, partner_id, partner_name)
-    await update.message.reply_text(
-        f"Готово! На этой неделе твоей парой будет {partner_name} 🫶🏻"
-    )
+    if awaiting_add_voter:
+        add_participant(current_poll_id, partner_id, partner_name, None)
+        total = len(get_participants(current_poll_id))
+        await update.message.reply_text(f"Добавила {partner_name} в список проголосовавших. Теперь их {total}.")
+    else:
+        set_manual_pick(current_poll_id, partner_id, partner_name)
+        await update.message.reply_text(
+            f"Готово! На этой неделе твоей парой будет {partner_name} 🫶🏻"
+        )
 
 
 def main():
