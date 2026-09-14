@@ -463,6 +463,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔓 /unlock_pairs — снять блокировку, если пары для текущего опроса уже отправлялись, а нужно переотправить\n"
             "📋 /current_pairs — посмотреть, какие пары реально опубликованы для текущего опроса\n"
             "🗳 /polls — список последних опросов, можно вернуть активным любой из них (если случайно отправили новый поверх)\n"
+            "➕ /add_voter — добавить человека в список проголосовавших вручную, если бот не засчитал голос (ID/@username/ссылка/пересланное сообщение)\n"
             "🙈 /glitch — отправить случайное «сломанное» сообщение (прикрыть удалённый пост)\n\n"
             "Кнопки ниже делают то же самое, что и команды выше — просто быстрее:",
             reply_markup=ADMIN_HELP_KEYBOARD,
@@ -889,16 +890,7 @@ async def cmd_polls(update: Update, context: ContextTypes.DEFAULT_TYPE):
         published = " ✅ пары отправлены" if is_pairs_published(poll_id) else ""
         lines.append(f"— {votes} голосов{mark}{published}")
         if poll_id != current_poll_id:
-            buttons.append([
-                InlineKeyboardButton(f"↩️ Сделать активным ({votes})", callback_data=f"setpoll:{poll_id}"),
-                InlineKeyboardButton("🔗 Объединить с активным", callback_data=f"mergepoll:{poll_id}"),
-            ])
-
-    lines.append(
-        "\n«Объединить с активным» — если голоса разъехались по разным опросам "
-        "(например, случайно отправили новый поверх старого) — добавляет всех "
-        "проголосовавших «Да» из этого опроса к текущему активному, никого не теряя."
-    )
+            buttons.append([InlineKeyboardButton(f"↩️ Сделать активным ({votes})", callback_data=f"setpoll:{poll_id}")])
 
     await update.message.reply_text(
         "\n".join(lines),
@@ -920,35 +912,37 @@ async def handle_setpoll_button(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
-async def handle_mergepoll_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Переносит всех проголосовавших "Да" из другого опроса в текущий активный —
-    чинит ситуацию, когда голоса из-за бага/переключений разъехались по разным опросам."""
-    query = update.callback_query
-    if not ADMIN_USER_ID or query.from_user.id != ADMIN_USER_ID:
-        await query.answer("Эта кнопка доступна только администратору чата.", show_alert=True)
+async def cmd_add_voter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вручную добавляет человека в список проголосовавших "Да" за текущий опрос —
+    на случай если Telegram/бот не засчитал реальный голос. Только для админа.
+
+    Принимает что угодно: reply на сообщение в группе, пересланное сообщение,
+    @username, ссылку t.me/username или Telegram ID — как /pick.
+    """
+    if not ADMIN_USER_ID or update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда доступна только администратору чата.")
         return
-    await query.answer()
 
     current_poll_id = get_current_poll_id()
     if not current_poll_id:
-        await query.edit_message_text("Сейчас нет активного опроса — сначала выбери его через /polls.")
+        await update.message.reply_text("Сейчас нет активного опроса — сначала выбери его через /polls.")
         return
 
-    source_poll_id = query.data.split(":", 1)[1]
-    existing_ids = {uid for uid, _, _ in get_participants(current_poll_id)}
-    source_participants = get_participants(source_poll_id)
+    if not update.message.reply_to_message and not context.args:
+        await update.message.reply_text(PICK_USAGE)
+        return
 
-    added = 0
-    for uid, name, username in source_participants:
-        if uid not in existing_ids:
-            add_participant(current_poll_id, uid, name, username)
-            added += 1
+    text_arg = " ".join(context.args) if context.args else None
+    partner_id, partner_name = await _resolve_partner(context.bot, current_poll_id, update.message, text_override=text_arg)
+    if not partner_name:
+        await update.message.reply_text(
+            "Не смогла найти этого человека — проверь юзернейм/ID/ссылку, или перешли её сообщение целиком."
+        )
+        return
 
+    add_participant(current_poll_id, partner_id, partner_name, None)
     total = len(get_participants(current_poll_id))
-    await query.edit_message_text(
-        f"Готово — добавлено {added} новых участниц из того опроса. "
-        f"Теперь в текущем активном опросе {total} голосов «Да»."
-    )
+    await update.message.reply_text(f"Добавила {partner_name} в список проголосовавших. Теперь их {total}.")
 
 
 async def cmd_current_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1188,6 +1182,7 @@ def main():
     application.add_handler(CommandHandler("unlock_pairs", cmd_unlock_pairs))
     application.add_handler(CommandHandler("current_pairs", cmd_current_pairs))
     application.add_handler(CommandHandler("polls", cmd_polls))
+    application.add_handler(CommandHandler("add_voter", cmd_add_voter))
     application.add_handler(CommandHandler("glitch", cmd_glitch))
     application.add_handler(CommandHandler("pick", cmd_pick))
     application.add_handler(CallbackQueryHandler(
@@ -1197,7 +1192,6 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
     application.add_handler(CallbackQueryHandler(handle_setpoll_button, pattern=r"^setpoll:"))
-    application.add_handler(CallbackQueryHandler(handle_mergepoll_button, pattern=r"^mergepoll:"))
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
@@ -1239,6 +1233,7 @@ def main():
                         BotCommand("unlock_pairs", "Снять блокировку повторной отправки пар"),
                         BotCommand("current_pairs", "Показать опубликованные пары"),
                         BotCommand("polls", "Список опросов, вернуть активным нужный"),
+                        BotCommand("add_voter", "Добавить голос вручную"),
                         BotCommand("glitch", "Отправить «сломанное» сообщение"),
                         BotCommand("topicid", "Узнать ID темы группы"),
                     ],
