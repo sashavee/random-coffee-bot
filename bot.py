@@ -284,18 +284,22 @@ async def send_weekly_poll(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Срабатывает при любом голосовании в опросе — фильтруем по актуальному poll_id."""
-    answer = update.poll_answer
-    current_poll_id = get_current_poll_id()
-    if answer.poll_id != current_poll_id:
-        return  # старый/чужой опрос, игнорируем
+    """Срабатывает при любом голосовании в любом нашем опросе.
 
+    Важно: пишем голос под тем poll_id, за который реально проголосовали
+    (answer.poll_id), а не под "текущим" — иначе если пока голос летел,
+    админ переключила активный опрос через /polls, голос тихо терялся.
+    Какой из опросов считать активным для распределения пар — решает
+    отдельно current_poll (через /polls), сюда это не влияет.
+    """
+    answer = update.poll_answer
+    poll_id = answer.poll_id
     user = answer.user
     if 0 in answer.option_ids:  # индекс 0 = "Да, давайте!"
-        add_participant(current_poll_id, user.id, full_name(user), user.username)
-        logger.info(f"{full_name(user)} присоединилась к Random Coffee")
+        add_participant(poll_id, user.id, full_name(user), user.username)
+        logger.info(f"{full_name(user)} присоединилась к Random Coffee (poll {poll_id})")
     else:
-        remove_participant(current_poll_id, user.id)
+        remove_participant(poll_id, user.id)
 
 
 def make_pairs(participants):
