@@ -1065,6 +1065,7 @@ async def cmd_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not update.message.reply_to_message and not context.args:
+        context.user_data["awaiting_pick"] = True
         await update.message.reply_text(PICK_USAGE)
         return
 
@@ -1141,7 +1142,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_manual_picker, pattern=r"^(mtoggle:\d+|mrandom|mdone|mcancel)$"))
     application.add_handler(CallbackQueryHandler(handle_glitch_buttons, pattern=r"^glitch:"))
     application.add_handler(CallbackQueryHandler(handle_setpoll_button, pattern=r"^setpoll:"))
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, handle_pick_input))
+    application.add_handler(MessageHandler(~filters.COMMAND, handle_pick_input))
     application.add_handler(PollAnswerHandler(handle_poll_answer))
 
     scheduler = AsyncIOScheduler(timezone="Europe/Vilnius")
